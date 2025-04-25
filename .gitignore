@@ -1,0 +1,4 @@
+*.png
+*.gz
+*.pkl
+dataset_zero/__pycache__
