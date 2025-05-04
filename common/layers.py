@@ -1,7 +1,7 @@
 # coding: utf-8
 import numpy as np
 from common.functions import *
-
+from common.util import im2col, col2im
 
 class Relu:
     def __init__(self):
@@ -186,3 +186,91 @@ class Dropout:
 
     def backward(self, dout):
         return dout * self.mask
+    
+
+class Convolution:
+    def __init__(self, W, b, stride=1, pad=0):
+        self.W= W
+        self.b = b
+        self.stride = stride
+        self.pad = pad
+
+        # 中間データ (backward時に必要)
+        self.x = None
+        self.col = None
+        self.col_W = None
+
+        # 重み・バイアスパラメータの微分
+        self.dW = None
+        self.db = None
+    
+    def forward(self, x):
+        FN, C, FH, FW = self.W.shape
+        N, C, H, W = x.shape
+        out_h = 1 + int((H + 2 * self.pad - FH) / self.stride)
+        out_w = 1 + int((W + 2 * self.pad - FW) / self.stride)
+
+        col = im2col(x, FH, FW, self.stride, self.pad) # (データ数 * 出力の高さ * 出力の幅、チャンネル数 * フィルタの高さ * フィルタの幅)
+        col_W = self.W.reshape(FN, -1).T # (チャンネル数 * フィルタの高さ * フィルタの幅、フィルタ数)
+        out = np.dot(col, col_W) + self.b # (データ数 * 出力の高さ * 出力の幅、フィルタ数)
+        out = out.reshape(N, out_h, out_w, -1).transpose(0, 3, 1, 2) # (データ数、フィルタ数、出力の高さ、出力の幅)に変形
+
+        self.x = x
+        self.col = col
+        self.col_W = col_W
+        return out
+
+    def backward(self, dout):
+        FN, C, FH, FW = self.W.shape
+        dout = dout.transpose(0, 2, 3, 1).reshape(-1, FN)  #  (データ数 * 出力の高さ * 出力の幅、フィルタ数)
+
+        self.db = np.sum(dout, axis=0) # (フィルタ数)
+        self.dW = np.dot(self.col.T, dout) # (チャンネル数 * フィルタの高さ * フィルタの幅、フィルタ数)
+        self.dW = self.dW.transpose(1, 0).reshape(FN, C, FH, FW) # (フィルタ数、チャンネル数、フィルタの高さ、フィルタの幅)dx = col2im
+
+        dcol = np.dot(dout, self.col_W.T) # (データ数 * 出力の高さ * 出力の幅、チャンネル数 * フィルタの高さ * フィルタの幅)
+        dx = col2im(dcol, self.x.shape, FH, FW, self.stride, self.pad)
+        return dx
+    
+class Pooling:
+    def __init__(self, pool_h, pool_w, stride=2, pad=0):
+        self.pool_h = pool_h
+        self.pool_w = pool_w
+        self.stride = stride
+        self.pad = pad
+
+        self.x = None
+        self.arg_max = None
+
+    def forward(self, x):
+        N, C, H, W = x.shape
+        out_h = int(1 + (H - self.pool_h) / self.stride)
+        out_w = int(1 + (W - self.pool_w) / self.stride)
+
+        col = im2col(x, self.pool_h, self.pool_w, self.stride, self.pad) # (データ数 * 出力の高さ * 出力の幅、チャンネル数 * フィルタの高さ * フィルタの幅)
+        col = col.reshape(-1, self.pool_h * self.pool_w) # (データ数 * 出力の高さ * 出力の幅 * チャンネル数、フィルタの高さ * フィルタの幅)
+
+        arg_max = np.argmax(col, axis=1) # (データ数 * 出力の高さ * 出力の幅 * チャンネル数)
+        out = np.max(col, axis=1)
+        out = out.reshape(N, out_h, out_w, C).transpose(0, 3, 1, 2) # (データ数、フィルタ数、出力の高さ、出力の幅)に変形
+
+        self.x = x
+        self.arg_max = arg_max
+        return out
+    
+    def backward(self, dout):
+        dout = dout.transpose(0, 2, 3, 1) # (データ数、出力の高さ、出力の幅、フィルタ数)
+        pool_size= self.pool_h * self.pool_w
+        # 各プーリング領域に対して、全要素の勾配を仮で用意
+        dmax = np.zeros((dout.size, pool_size)) # (データ数 * 出力の高さ * 出力の幅 * フィルタ数、フィルタの高さ * フィルタの幅)
+        # 最大値が入っていたところだけに勾配を入れる
+        dmax[np.arange(self.arg_max.size), self.arg_max.flatten()] = dout.flatten() # (データ数 * 出力の高さ * 出力の幅 * フィルタ数)
+        # dmaxを元の形に戻す -> (データ数、出力の高さ、出力の幅、フィルタ数、フィルタの高さ * フィルタの幅)
+        dmax = dmax.reshape(dout.shape + (pool_size,)) 
+        # dmaxを(データ数*出力の高さ*出力の幅、フィルタ数*フィルタの高さ*フィルタの幅)に変形
+        dcol = dmax.reshape(dmax.shape[0] * dmax.shape[1] * dmax.shape[2], -1)
+        # dcolを(データ数、チャネル数、入力の高さ、入力の幅)に変形
+        dx = col2im(dcol, self.x.shape, self.pool_h, self.pool_w, self.stride, self.pad)
+        
+        return dx
+
